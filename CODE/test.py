@@ -2,7 +2,7 @@ import os
 import argparse
 import torch
 from dataset import TestDataset
-from SAM2UNet import SAM2UNet
+from SAM2UNetDC import SAM2UNet
 import tifffile as tiff
 import numpy as np
 from scipy.ndimage import zoom

@@ -12,7 +12,7 @@ parser.add_argument(
 
 parser.add_argument(
     "--pretrain_path",
-    default="/root/shared-nvme/Project/Nerve/Pretrain/sam2_hiera_large.pt",
+    default="/root/shared-nvme/lyx/Project/Nerve/Trial/Pretrian/sam2_hiera_large.pt",
     help="Path to the SAM2 pretrained model weights",
 )
 
@@ -66,17 +66,17 @@ parser.add_argument(
 )
 parser.add_argument(
     "--checkpoint",
-    default="/root/shared-nvme/Project/Nerve/Trial/RES/Model/sert-dsc-0-epoch-10.pth",
+    default="/root/shared-nvme/lyx/Project/Nerve/Trial/Res/Save/sert-reference/sert-old-ref-epoch-5.pth",
     help="Path to the model checkpoint"
 )
 parser.add_argument(
     "--test_image_path",
-    default="/root/shared-nvme/Project/Nerve/Data/Sert-Stanford/test/test/volume-8bit",
+    default="/root/shared-nvme/lyx/Project/Nerve/Data/Sert-Stanford/test/test/volume-8bit",
     help="Path to the 3D test images"
 )
 parser.add_argument(
     "--predict_path",
-    default="/root/shared-nvme/Project/Nerve/Trial/RES/Predicts",
+    default="/root/shared-nvme/lyx/Project/Nerve/Trial/Res/Predicts/Predicts_3D",
     help="Path to save 3D prediction results and original slices"
 )
 

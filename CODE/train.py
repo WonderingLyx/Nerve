@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from dataset import FullDataset
-from SAM2UNet import SAM2UNet
+from SAM2UNetDC import SAM2UNet
 import wandb
 import tifffile as tiff
 from reconstruct2 import load_tiff_stack, reconstruct_original_from_coronal, apply_transformations, save_tiff_stack
