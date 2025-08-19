@@ -21,7 +21,7 @@ from monai.transforms import Compose, Orientation, ScaleIntensityRange, LoadImag
 import torch.multiprocessing
 import warnings
 from pytorch_lightning import LightningModule
-from Simple_Point_Erosion_Module import Simple_Point_Erosion_module
+from Simple_Point_Erosion_Module_3D import Simple_Point_Erosion_module
 from monai.inferers import sliding_window_inference
 import yaml
 from Nerve3D import NerveDataset_MIM_PL
@@ -29,6 +29,8 @@ from Nerve3D import NerveDataset_MIM_PL
 import logging
 from datetime import datetime
 from monai.transforms import RandAffine
+from Nerve3D import LoadTiffStack
+from monai.transforms import ToMetaTensord, ScaleIntensityRanged
 
 def Get_logger(filename, verbosity=1, name=None):
     level_dict = {0: logging.DEBUG, 1: logging.INFO, 2: logging.WARNING}
@@ -63,7 +65,7 @@ def Masked_Shape_Reconstruction(config_path, device = torch.device("cuda:0")):
     config = yaml.load(cont, Loader=yaml.FullLoader)
     
     #! modify
-    save_dir = "./Logs"
+    save_dir = "/root/shared-nvme/lyx/Project/Nerve/Trial/Res/Log/wandb"
     
     exp_save_dir = os.path.join(save_dir+'/wandb', config["Name"])
     os.makedirs(exp_save_dir, exist_ok=True)
@@ -90,7 +92,7 @@ def Masked_Shape_Reconstruction(config_path, device = torch.device("cuda:0")):
         devices=config["Devices"],
         logger=logger,
         callbacks=[lr_monitor, check_point],
-        check_val_every_n_epoch=2,
+        check_val_every_n_epoch=5,
     )
     trainer.fit(model, datamodule=dataset)
 
@@ -118,7 +120,7 @@ class DeepClosing(LightningModule):
         self.net = Unet_MIM(**NetConfig["args"])
         self.input_type = NetConfig.get("input_type", "image")  # input_type: image or label
 
-        self.test_sw_window_size = self.config.get("ts_sw_size", (128, 128))      # val/test shift window size
+        self.test_sw_window_size = self.config.get("ts_sw_size", (128, 128, 128))      # val/test shift window size
         self.test_sw_batch_size = self.config.get("ts_sw_batchsize", 4)          # val/test shift window batchsize
         self.test_sw_overlap = self.config.get("ts_sw_overlap", 0.5)        # val/test shift window overlap
         
@@ -126,10 +128,10 @@ class DeepClosing(LightningModule):
         # topoloss weight (alpha)
         self.topoloss_weight = NetConfig.get("topo_weight", 1.0e-1 )
 
-
+        self.embd_path = SPE_Config.get("emd_path", "/root/shared-nvme/lyx/simple_lookup_embedding.pt")
         # Simple Point Erosion Module   
-        target_H_W = SPE_Config.get("target_HW", (128,128))
-        self.SPE = Simple_Point_Erosion_module(target_H_W=target_H_W)
+        target_D_H_W = SPE_Config.get("target_DHW", (128,128,128))
+        self.SPE = Simple_Point_Erosion_module(target_D_H_W=target_D_H_W, embd_path=self.embd_path)
         self.tubescaler_range = (0,2)
         self.if_Recurrent_TubeScaler = True
         
@@ -141,21 +143,21 @@ class DeepClosing(LightningModule):
 
 
 
-    def forward(self, x):  
+    def forward(self, x, y):  
         # x : B,1,H,W, binary, non-masked shape
         
         # perform Recurrent TubeScaler here
         if self.if_Recurrent_TubeScaler and self.training:    
             # random sample a k from the range of self.tubescaler_range
             k_r = random.randint(self.tubescaler_range[0],self.tubescaler_range[1])
-            if k_r ==0:
-                print(k_r)
+            # if k_r ==0:
+            #     print(k_r)
             x,_ = self.SPE.RSPE(T=x,M_T=x,max_K=k_r)
             self.log("train/k_r",k_r,prog_bar=True,on_step=True)
         
 
         
-        result_dict = self.net(x)
+        result_dict = self.net(x, y)
         pred = result_dict["pred"]
         masked_img = result_dict["masked_img"]
         residue = pred - masked_img
@@ -163,9 +165,9 @@ class DeepClosing(LightningModule):
         True_residue = gt - masked_img
 
 
-        pred_clone = pred.clone().detach()
+        #pred_clone = pred.clone().detach()
         # threshold with 0.5
-        pred_clone[pred_clone>0.5] = 1
+        #pred_clone[pred_clone>0.5] = 1
         simple_points_eroded_results,_ = self.SPE.RSPE(T=gt,M_T=True_residue,max_K=10)
         critical_points = simple_points_eroded_results - masked_img
         
@@ -200,7 +202,9 @@ class DeepClosing(LightningModule):
 
     def training_step(self, batch_data, batch_idx):
         input = batch_data[self.input_type]
-        result_dict = self(input)
+        label = batch_data['label']
+
+        result_dict = self(input, label)
         # additional topo loss
         topo_loss = F.mse_loss(result_dict["pred"]*result_dict["critical_points"], result_dict["origin_imgs"]*result_dict["critical_points"])
         result_dict["loss"] = result_dict["loss"] + topo_loss * self.topoloss_weight
@@ -210,8 +214,9 @@ class DeepClosing(LightningModule):
 
     def validation_step(self, batch_data, batch_idx):
         input = batch_data[self.input_type]
+        label = batch_data['label']
 
-        result_dict = self(input)
+        result_dict = self(input, label)
         self.log_something(result_dict,"val")
         return result_dict
     
@@ -276,7 +281,7 @@ class DeepClosing(LightningModule):
         
         # self.log("{}/mask_ratio".format(stage),
         #          result_dict["mask_ratio"], on_step=True, on_epoch=False)
-        log_info.append(f"mask_ratio:{result_dict["mask_ratio"]:.4f}")
+        log_info.append(f"mask_ratio:{result_dict["mask_ratio"][1]:.4f}")
 
         patch_size = result_dict["patch_size"]
 
@@ -315,14 +320,14 @@ class DeepClosing(LightningModule):
     def Simple_Component_Erosion(self, T, M_T):
         """
         Simple Component Erosion
-        T: binary structure, shape: 1,1,H,W
-        M_T: the mask of specified region, binary,  shape 1,1,H,W
+        T: binary structure, shape: 1,1,D,H,W
+        M_T: the mask of specified region, binary,  shape 1,1,D,H,W
         """
         import skimage
         # compute connected components of M_T
         
         M_T_numpy = M_T.squeeze().detach().cpu().numpy().astype(np.uint8)
-        Lcc = skimage.measure.label(M_T_numpy, connectivity=2)
+        Lcc = skimage.measure.label(M_T_numpy, connectivity=3)
         
         out, _ = self.SPE.RSPE(T=T, M_T=M_T, max_K=np.inf)
         remained = Lcc * out.squeeze().detach().cpu().numpy()
@@ -330,11 +335,18 @@ class DeepClosing(LightningModule):
         
         result_array = (T - M_T).detach().squeeze().cpu().numpy()   # H,W
         
-        # Retrieve
-        for label in remained_cc_label:
-            if label == 0:
-                continue
-            result_array = result_array + (Lcc == label) * 1
+        # # Retrieve
+        # for label in remained_cc_label:
+        #     if label == 0:
+        #         continue
+        #     result_array = result_array + (Lcc == label) * 1
+
+        valid_labels = remained_cc_label[remained_cc_label != 0]
+        if valid_labels.size > 0:
+            # 生成所有有效标签的掩码（向量化操作）
+            mask = np.isin(Lcc, valid_labels).astype(result_array.dtype)
+            # 一次性添加所有有效区域
+            result_array += mask
         
         result_array = torch.from_numpy(result_array).to(T.device)
         return result_array
@@ -345,7 +357,7 @@ class DeepClosing(LightningModule):
     def DeepDilation(self,T,is_infer_sliding_window=True, sw_roi_size=(128,128),sw_batch_size=4,verbose=False):
         """ DeepDilation
         using pre-trained AutoEncoder to indicate regions of disconnection
-        T: presegmented image,  binary, shape: shape, B,1,H,W
+        T: presegmented image,  binary, shape: shape, B,1,D,H,W
         is_infer_sliding_window: whether to use sliding window inference
         verbose: whether to print the information
         sw_roi_size: the size of sliding window
@@ -353,7 +365,7 @@ class DeepClosing(LightningModule):
         self.eval()
         
         if is_infer_sliding_window:
-            sw_batch_size = 4
+            sw_batch_size = sw_batch_size
             roi_size = sw_roi_size if sw_roi_size !=None else self.roi_size
             if verbose:
                 print("using sliding window inference with roi_size:{}".format(roi_size))
@@ -366,34 +378,41 @@ class DeepClosing(LightningModule):
         return T_dd
 
     @torch.no_grad()
-    def DeepClosing(self,T,is_infer_sliding_window=True, sw_roi_size=(128,128),sw_batch_size=4,verbose=False):
+    def DeepClosing(self,T,is_infer_sliding_window=True, sw_roi_size=(128,128,128),sw_batch_size=4,verbose=False):
         if type(T) == torch.Tensor:
-            # assert T shape is B,1,H,W
-            assert len(T.shape) == 4, "T shape must be B,1,H,W"
+            # assert T shape is B,1,D,H,W
+            assert len(T.shape) == 5, "T shape must be B,1,D,H,W"
             # assert binay 
             assert T.unique() == torch.tensor([0,1]), "T must be binary"
         elif type(T) == str: # the path of the image
             transform = Compose(
                 [
-                    LoadImage(image_only=True, reader='PILReader'),
-                    EnsureChannelFirst(),
-                    ScaleIntensityRange(a_min=0, a_max=255,
-                                        b_min=0, b_max=1, clip=True),
+                    #LoadImage(image_only=True, reader='PILReader'),
+                    LoadTiffStack(keys=['image']),
+                    ToMetaTensord(keys=['image']),
+                    #EnsureChannelFirst(),
+                    ScaleIntensityRanged(keys=["image"], a_min=0, a_max=255,
+                                     b_min=0, b_max=1, clip=True),
                     #Orientation(axcodes="RAS"),
-                    EnsureType(),
+                    EnsureTyped(keys=['image']),
                 ]
                 )
+            T = {'image': T}
             T = transform(T) 
-            if len(T.shape) ==4:  # RGB image, the last channel is 3
-                # to check all the channels are the same
-                assert (T[:,:,:,0] == T[:,:,:,1]).all()
-                assert (T[:,:,:,0] == T[:,:,:,2]).all()
-                T = T[:,:,:,0]
+            T = T['image']
+            T[T >= 0.5] = 1
+            T[T < 0.5] = 0
+            # if len(T.shape) ==4:  # RGB image, the last channel is 3
+            #     # to check all the channels are the same
+            #     assert (T[:,:,:,0] == T[:,:,:,1]).all()
+            #     assert (T[:,:,:,0] == T[:,:,:,2]).all()
+            #     T = T[:,:,:,0]
             
             T = T.unsqueeze(0).to(self.device)
-        T_dd = self.DeepDilation(T=T,is_infer_sliding_window=True, sw_roi_size=(128,128),sw_batch_size=4,verbose=False)
-        T_dd = transform.inverse(T_dd.squeeze().cpu())
-        T_dd = AsDiscrete(threshold=0.2)(T_dd).int()
+        T_dd = self.DeepDilation(T=T,is_infer_sliding_window=True, sw_roi_size=(128,128,128),sw_batch_size=4,verbose=False)
+        #T_dd = transform.inverse(T_dd.squeeze().cpu())
+        T_dd = T_dd.squeeze().cpu()
+        T_dd = AsDiscrete(threshold=0.5)(T_dd).int()
         
         M_T = T_dd.squeeze() - T.squeeze().cpu()
         M_T[M_T<0] =0
@@ -414,7 +433,7 @@ class DeepClosing(LightningModule):
 class Unet_MIM(nn.Module):
     "Unet with Masked Image Modeling"
 
-    def __init__(self, in_chans=3, mask_ratio=0.75, loss_type="L2", image_size=128, patch_size=([2,8],[2,8]),
+    def __init__(self, in_chans=3, mask_ratio_fh=0.5, mask_ratio_bg=0.25, loss_type="L2", image_size=128, patch_size=([2,8],[2,8]),
                  is_random_rotate=False, dropout_ratio=0.0, network_setting="default", final_act=None):
         """
 
@@ -432,7 +451,10 @@ class Unet_MIM(nn.Module):
         super(Unet_MIM, self).__init__()
         self.patch_size = patch_size
         self.image_channel = in_chans  # add by Fivethousand
-        self.mask_ratio = mask_ratio
+        self.mask_ratio = {
+            0:mask_ratio_bg,
+            1:mask_ratio_fh
+        }
         self.loss_type = loss_type
         self.is_random_rotate = is_random_rotate
         self.dropout_ratio = dropout_ratio
@@ -489,13 +511,21 @@ class Unet_MIM(nn.Module):
             mask_ratio = random.choice(self.mask_ratio)
         elif isinstance(self.mask_ratio, tuple):
             mask_ratio = np.random.uniform(*self.mask_ratio)
+        elif isinstance(self.mask_ratio, dict):
+            mask_ratio = {}
+            if isinstance(self.mask_ratio[0], tuple):
+                for i in range(len(self.mask_ratio)):
+                    mask_ratio[i] = np.random.uniform(*self.mask_ratio[i])
+            else:
+                raise NotImplementedError
         else:
             raise NotImplementedError
         return mask_ratio, (patch_h, patch_w, patch_d)
 
-    def forward(self, imgs):
+    def forward(self, imgs, labels):
         mask_ratio, patch_size = self.get_mask_ratio_and_patch_size()
-        masked_img, mask = self.random_mask_FT(imgs, mask_ratio, patch_size)
+
+        masked_img, mask = self.random_mask_FT(imgs, labels, mask_ratio, patch_size)
 
         pred = self.net(masked_img)
         loss = self.forward_loss(pred, imgs, mask)  
@@ -511,9 +541,8 @@ class Unet_MIM(nn.Module):
             raise NotImplementedError
         return loss
 
-    def random_mask_FT(self, imgs, mask_ratio, patch_size):
-        mask = mask_generator3D_v2(input_tensor=imgs, mask_ratio=mask_ratio,
-                                    patch_sizes=patch_size, if_random_affine=self.is_random_rotate)
+    def random_mask_FT(self, imgs, labels, mask_ratio, patch_size):
+        mask = mask_generator3D_v2_lb(imgs, labels, mask_ratio, patch_size, if_random_affine=self.is_random_rotate, threshold=0.2)
         mask_multiply = torch.abs(1 - mask)  # Now 1->0, 0->1
         masked_img = imgs * mask_multiply
         return masked_img, mask
@@ -638,8 +667,132 @@ def mask_generator2D_v2(input_tensor, mask_ratio, patch_sizes, if_random_affine=
     mask = mask.to(input_tensor.device)
     return mask
 
+def mask_generator3D_v2_lb(input_tensor, label_tensor, mask_ratios, patch_sizes, if_random_affine=False, threshold=0.3):
+    """
+    和原mask_generator3D_v2_random区别, batch中每个样本的mask不同,根据Label设定不同的mask ratio
 
-def mask_generator3D_v2(input_tensor, mask_ratio, patch_sizes, if_random_affine=False):
+    generate 3D mask with different ratios for different labels
+    :param input_tensor: input tensor [B, 1, D, H, W]
+    :param label_tensor: label tensor [B, 1, D, H, W] containing label values (e.g., 0 for background, 1 for foreground)
+    :param mask_ratios: dictionary of mask ratios for each label, e.g., {0:0.2, 1:0.5}
+    :param patch_sizes: the patch size of cubic mask [d, h, w]
+    :param if_random_affine: whether to apply random rotation onto the generated 3D mask
+    :return: mask with shape [B,1,D,H,W], 0 is to keep, 1 is to remove
+    """
+    # 验证输入参数
+    assert type(patch_sizes) == tuple and len(patch_sizes) == 3, "patch_sizes must be a 3-element tuple (d, h, w)"
+    p_d, p_h, p_w = patch_sizes
+    
+    # 验证输入和标签张量形状匹配
+    B, C, D, H, W = input_tensor.shape
+    assert C == 1, "input_tensor must have 1 channel dimension"
+    assert label_tensor.shape == (B, 1, D, H, W), "label_tensor shape must match input_tensor"
+    assert isinstance(mask_ratios, dict), "mask_ratios must be a non-empty dictionary"
+    
+    # 对原始D, H, W进行填充，确保能被patch大小整除
+    new_D = int(p_d * np.ceil(D / p_d))
+    new_H = int(p_h * np.ceil(H / p_h))
+    new_W = int(p_w * np.ceil(W / p_w))
+    assert new_D >= D and new_H >= H and new_W >= W, "new dimensions must be larger than original"
+    # 初始化掩码列表（每个样本单独处理）
+    masks = []
+    
+    for b in range(B):
+        # 对单个样本的输入和标签进行填充
+        input_single = input_tensor[b:b+1]
+        label_single = label_tensor[b:b+1]
+        
+        # 填充输入和标签到新尺寸
+        pad_d = new_D - D
+        pad_h = new_H - H
+        pad_w = new_W - W
+        pad = (0, pad_w, 0, pad_h, 0, pad_d)  # (左,右,上,下,前,后)
+        
+        padded_label = torch.nn.functional.pad(label_single, pad, mode='constant', value=0)
+        padded_label = padded_label.int()  # 确保标签为整数类型
+        
+        # 初始化全1掩码（1表示需要mask的区域）
+        mask = torch.ones(1, 1, new_D, new_H, new_W, device=input_tensor.device)
+        
+        # 计算各维度上的patch数量
+        d = new_D // p_d
+        h = new_H // p_h
+        w = new_W // p_w
+        #total_patches = d * h * w
+        
+        # 将标签重塑为patch结构以确定每个patch的主要标签
+        # 重塑为(1, 1, d_patch, p_d, h_patch, p_h, w_patch, p_w)
+        label_patched = padded_label.reshape(1, 1, d, p_d, h, p_h, w, p_w)
+        # 合并patch内部维度以统计主要标签
+        label_patched = label_patched.permute(0,1,2,4,6,3,5,7)
+        label_patched = label_patched.reshape(1, d, h, w, p_d * p_h * p_w)
+        
+        # 确定每个patch的主要标签（出现次数最多的标签）
+        label_m = label_patched.clone()
+        label_m = label_m.reshape(1*d*h*w, -1)
+        label_m = torch.sum(label_m, dim=1) > (p_d * p_h *p_w) * threshold
+
+        p_tr_num = len(label_m[label_m == 1])
+        p_tr_indxs = label_m.nonzero().squeeze()
+        p_fl_num = len(label_m[label_m == 0])
+        p_fl_indxs = (label_m == 0).nonzero().squeeze()
+
+        #mask = mask.reshape(1, 1, new_D, new_H, new_W)
+        mask = mask.reshape(1, 1, d, p_d, h, p_h, w, p_w)
+        mask = mask.permute(0,1,2,4,6,3,5,7)
+        mask = mask.reshape(1, d, h, w, p_d * p_h * p_w)
+        mask = mask.reshape(1*d*h*w, -1)
+
+        tr_keep_num = p_tr_num * (1 - mask_ratios[1]) #前景
+        fl_keep_num = p_fl_num * (1 - mask_ratios[0]) #背景
+
+        rand_indexs = torch.randperm(len(p_tr_indxs), device=mask.device)[:int(tr_keep_num)]
+        p_tr_indxs_select = p_tr_indxs[rand_indexs]
+
+        rand_indexs = torch.randperm(len(p_fl_indxs), device=mask.device)[:int(fl_keep_num)]
+        p_fl_indxs_select = p_fl_indxs[rand_indexs]
+
+        # p_tr_indxs_select = random.sample(p_tr_indxs.tolist(), int(tr_keep_num))
+        # p_fl_indxs_select = random.sample(p_fl_indxs.tolist(), int(fl_keep_num))
+
+        zero = torch.zeros(size=(p_d * p_h * p_w,), device=mask.device)
+        mask[p_tr_indxs_select] = zero
+        mask[p_fl_indxs_select] = zero
+
+        mask = mask.reshape(-1, p_d, p_h, p_w)
+        mask = mask.reshape(1, d, h, w, p_d, p_h, p_w)
+        mask = mask.permute(0, 1, 4, 2, 5, 3, 6) #* d, h, w, p_d, p_h, p_w -> d, p_d, h, p_h, w, p_w
+        mask = mask.reshape(1, new_D, new_H, new_W)
+        mask = mask.unsqueeze(0)
+
+        if_random_affine = False
+        #! 可选：应用随机仿射变换增强掩码多样性. RandAffine,默认填充为0,不能用
+        if if_random_affine:
+            affine_transform = RandAffine(
+                rotate_range=[(-np.pi/6, np.pi/6)] * 3,  # 三个轴的旋转范围（±30度）
+                prob=0.8,
+                mode="nearest",
+                padding_mode="constant"
+            )
+            # 应用变换并四舍五入确保掩码值为0或1
+            result = affine_transform(mask[0].cpu())  # 暂时移到CPU处理
+            mask[0] = torch.round(result).to(input_tensor.device)
+        
+        # 裁剪回原始输入尺寸
+        new_mask = RandSpatialCrop(
+            roi_size=(D, H, W), 
+            random_size=False
+        )(mask[0]).unsqueeze(0)
+        
+        masks.append(new_mask)
+    
+    # 合并所有样本的掩码
+    mask = torch.cat(masks, dim=0)
+    
+    return mask
+
+
+def mask_generator3D_v2_random(input_tensor, mask_ratio, patch_sizes, if_random_affine=False):
     """
     generate 3D mask
     :param input_tensor:  input_tensor [B, 1, D, H, W]
@@ -707,7 +860,7 @@ def mask_generator3D_v2(input_tensor, mask_ratio, patch_sizes, if_random_affine=
     mask = mask.reshape(1, 1, new_D, new_H, new_W)
     
     """
-    可选：应用随机仿射变换增强掩码多样性
+    可选：应用随机仿射变换增强掩码多样性 注意padding默认为0
     """
     if if_random_affine:
         # 对3D掩码应用随机旋转（三个轴都进行随机旋转）

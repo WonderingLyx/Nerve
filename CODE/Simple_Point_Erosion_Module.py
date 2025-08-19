@@ -259,11 +259,23 @@ class Simple_Point_Erosion_module():
     
     loop_forward = RSPE
     
-        
+
+if __name__ == "__main__":
+
+    trial_patch = torch.zeros((1,1,128,128))
+    trial_patch[:,:,1,:] = 1
+    trial_patch[:,:,3,3] = 1
+    device = torch.device("cuda:0")
+    trial_patch = trial_patch.to(device)
+
+    SPE = Simple_Point_Erosion_module(target_H_W=(128,128))
+
+    results = SPE.RSPE(trial_patch, trial_patch)
+    print(results[0].sum())
+
 
     
     
     
     
 
-    

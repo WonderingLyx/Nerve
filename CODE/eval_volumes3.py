@@ -8,7 +8,7 @@ from skimage import measure
 from functools import reduce
 import gudhi
 
-indx_dir = '/root/shared-nvme/Project/Nerve/Trial/CONFIG'
+indx_dir = '/root/shared-nvme/lyx/Project/Nerve/Trial/Nerve-sam2post/CONFIG'
 axis = ['x', 'y', 'z']
 patch_indx = []
 for k in axis:
@@ -259,7 +259,13 @@ def eval_all_volumes(target_dir, root_dir, pool_kernel, device):
         target_prefix = os.path.splitext(target_file)[0]
 
         # 在预测文件中查找对应文件
-        root_file = f"{target_prefix}.tiff_prediction.tiff"
+        #TODO 可以修改对应后缀
+        #*Origin
+        #root_file = f"{target_prefix}.tiff_prediction.tiff"
+        #*DC
+        root_file = f"{target_prefix}-DC.tif"
+
+
         #print(root_file)
         target_path = os.path.join(target_dir, target_file)
         root_path = os.path.join(root_dir, root_file)
@@ -290,8 +296,8 @@ def eval_all_volumes(target_dir, root_dir, pool_kernel, device):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--target', type=str, default='/root/shared-nvme/Project/Nerve/Data/Sert-Stanford/test/test/label-8bit', help='Path to the directory containing ground-truth .tif files')
-    parser.add_argument('--root', type=str, default='/root/shared-nvme/Project/Nerve/Trial/RES/Predicts', help='Path to the directory containing predicted .tiff files')
+    parser.add_argument('--target', type=str, default='/root/shared-nvme/lyx/Project/Nerve/Data/Sert-Stanford/test/test/label-8bit', help='Path to the directory containing ground-truth .tif files')
+    parser.add_argument('--root', type=str, default='/root/shared-nvme/lyx/Project/Nerve/Trial/Res/Predicts/Predicts_DC', help='Path to the directory containing predicted .tiff files')
     parser.add_argument('--kernel_size', type=int, default=3, help='Maxpooling kernel size')
     parser.add_argument('--device', type=str, default='cuda:0', help='Device to run the evaluation (e.g., cuda:0 or cpu)')
 
